@@ -7,13 +7,12 @@ YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
 YOOKASSA_API_KEY = os.getenv("YOOKASSA_API_KEY")
 MOY_NALOG_LOGIN = os.getenv("MOY_NALOG_LOGIN")
 MOY_NALOG_PASSWORD = os.getenv("MOY_NALOG_PASSWORD")
+DEVICE_ID = os.getenv("DEVICE_ID")
+SYNC_START_DATE = os.getenv("SYNC_START_DATE")
+INCOME_DESCRIPTION_TEMPLATE = os.getenv("INCOME_DESCRIPTION_TEMPLATE", "Платеж #{description}")
+CRON_SCHEDULE = os.getenv("CRON_SCHEDULE", "0 */4 * * *")
 
 STATE_FILE = "sync_state.json"
-SYNC_START_DATE = os.getenv("SYNC_START_DATE")
-
-INCOME_DESCRIPTION_TEMPLATE = os.getenv("INCOME_DESCRIPTION_TEMPLATE", "Платеж #{description}")
-
-CRON_SCHEDULE = os.getenv("CRON_SCHEDULE", "0 */4 * * *")
 
 def validate_config():
     required_vars = [
