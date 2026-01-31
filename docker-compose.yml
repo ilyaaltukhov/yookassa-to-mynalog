@@ -6,5 +6,6 @@ services:
     restart: always
     volumes:
       - ./.env:/app/.env
+      - ./logs:/app/logs
     environment:
       - PYTHONUNBUFFERED=1

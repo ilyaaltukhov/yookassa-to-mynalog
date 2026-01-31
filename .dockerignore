@@ -4,8 +4,8 @@ __pycache__/
 *.pyc
 
 # Logs
-*.log
-sync_state.json
+logs/sync.log
+logs/sync_state.json
 
 # ENV files
 .env
@@ -17,7 +17,8 @@ Dockerfile
 docker-compose.yml
 
 # Git
-.git
+.github/
+.git/
 .gitignore
 
 # Documentation

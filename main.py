@@ -3,26 +3,41 @@ import json
 import os
 import logging
 import httpx
+import hashlib
 from datetime import datetime, timedelta, timezone
 from yookassa import Configuration, Payment
 from tenacity import retry, stop_after_attempt, wait_exponential
 import config
 
+LOG_DIR = "logs"
+if not os.path.exists(LOG_DIR):
+    os.makedirs(LOG_DIR)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("sync.log", encoding='utf-8'),
+        logging.FileHandler(f"{LOG_DIR}/sync.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
+
+def generate_device_id_from_login(login: str) -> str:
+    return hashlib.sha256(login.encode('utf-8')).hexdigest()[:21]
 
 class MoyNalogAPI:
     def __init__(self, login, password):
         self.login = login
         self.password = password
         self.token = None
-        self.device_id = "EKlXkCYMIh28msCCrEHVb"
+        
+        if config.DEVICE_ID:
+            self.device_id = config.DEVICE_ID
+            logging.info(f"Используется deviceId из .env: {self.device_id}")
+        else:
+            self.device_id = generate_device_id_from_login(login)
+            logging.info(f"Сгенерирован deviceId на основе ИНН: {self.device_id}")
+
         self.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
         
         self.headers = {
@@ -30,7 +45,7 @@ class MoyNalogAPI:
             'Accept-Language': 'ru,en-US;q=0.9,en;q=0.8',
             'Connection': 'keep-alive',
             'Content-Type': 'application/json',
-            'Origin': 'https://lknpd.nalog.ru',
+            'Origin': 'https://lknpd.nalog.ru/',
             'Referer': 'https://lknpd.nalog.ru/',
             'User-Agent': self.user_agent,
             'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
@@ -40,7 +55,8 @@ class MoyNalogAPI:
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-origin'
         }
-        self.client = httpx.AsyncClient(headers=self.headers, timeout=30.0)
+        
+        self.client = httpx.AsyncClient(headers=self.headers, timeout=30.0 )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def authenticate(self):
@@ -57,20 +73,23 @@ class MoyNalogAPI:
                 }
             }
         }
+
         try:
-            response = await self.client.post(url, json=payload)
+            response = await self.client.post(url, json=payload )
             if response.status_code != 200:
                 logging.error(f"Ошибка авторизации (Код {response.status_code}): {response.text}")
                 raise Exception(f"HTTP {response.status_code}")
-            
+
             data = response.json()
             self.token = data.get("token")
             if not self.token:
-                raise Exception("Токен не получен в ответе")
+                raise Exception("Не удалось получить токен авторизации.")
+            
+            self.client.headers.update({'Authorization': f'Bearer {self.token}'})
             logging.info("✓ Успешная авторизация в Мой Налог.")
             return True
         except Exception as e:
-            logging.error(f"Ошибка при авторизации: {e}")
+            logging.error(f"Ошибка авторизации в Мой Налог: {e}")
             raise
 
     async def add_income(self, name, amount, date):
@@ -117,7 +136,7 @@ class MoyNalogAPI:
         try:
             response = await self.client.post(url, json=payload, headers=headers)
             
-            if response.status_code == 401: # Токен истек
+            if response.status_code == 401:
                 logging.warning("Токен истек, обновляем...")
                 try:
                     await self.authenticate()
@@ -150,7 +169,7 @@ class SyncManager:
         
         Configuration.configure(config.YOOKASSA_SHOP_ID, config.YOOKASSA_API_KEY)
         self.nalog = MoyNalogAPI(config.MOY_NALOG_LOGIN, config.MOY_NALOG_PASSWORD)
-        self.state_file = config.STATE_FILE
+        self.state_file = f"{LOG_DIR}/sync_state.json"
         self.state = self.load_state()
 
     def load_state(self):
