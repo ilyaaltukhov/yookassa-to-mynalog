@@ -27,26 +27,12 @@ def generate_device_id_from_login(login: str) -> str:
 
 
 class SafeFormatDict(dict):
-    """Словарь, который при отсутствии ключа возвращает плейсхолдер как есть вместо ошибки."""
     def __missing__(self, key):
         logging.warning(f"Неизвестная переменная в шаблоне: {{{key}}}")
         return f"{{{key}}}"
 
 
 def build_template_vars(payment) -> dict:
-    """
-    Собирает словарь переменных из платежа YooKassa для подстановки в шаблон.
-
-    Доступные переменные:
-        {id}                    — ID платежа в YooKassa (UUID)
-        {description}           — описание платежа или ID, если описания нет (обратная совместимость)
-        {payment_description}   — только описание платежа (пустая строка, если нет)
-        {order_number}          — номер счёта/заказа из metadata (например: 1227418-1)
-        {invoice_id}            — ID счёта из invoice_details (пустая строка, если нет)
-        {customer_name}         — название/имя из счёта (metadata custName)
-        {amount}                — сумма платежа
-        {merchant_customer_id}  — ID покупателя в вашей системе (пустая строка, если нет)
-    """
     metadata = payment.metadata or {}
 
     invoice_id = ""
@@ -291,14 +277,11 @@ class SyncManager:
                     template_vars = build_template_vars(payment)
                     description = config.INCOME_DESCRIPTION_TEMPLATE.format_map(template_vars)
 
-                    # Помечаем платёж как "в обработке" ДО отправки в налоговую,
-                    # чтобы при сбое он не был отправлен повторно (защита от дублей)
                     self.state["pending_payments"].append(payment.id)
                     self.save_state()
 
                     success = await self.nalog.add_income(description, amount, payment_date)
 
-                    # Переносим из pending в processed
                     self.state["pending_payments"].remove(payment.id)
                     if success:
                         self.state["processed_payments"].append(payment.id)
