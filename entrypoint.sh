@@ -10,6 +10,9 @@ TELEGRAM_STARTUP_NOTIFY=1 python /app/main.py
 
 CRON_SCHEDULE=$(python -c "import config; print(config.CRON_SCHEDULE)")
 
+TZ="${TZ#\'}"          ; TZ="${TZ%\'}"
+CRON_SCHEDULE="${CRON_SCHEDULE#\'}" ; CRON_SCHEDULE="${CRON_SCHEDULE%\'}"
+
 echo ""
 echo "Расписание: $CRON_SCHEDULE"
 echo "Переключение на регулярное выполнение..."
