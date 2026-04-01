@@ -406,6 +406,8 @@ class SyncManager:
         if pending:
             logging.warning(f"⚠ Обнаружено {len(pending)} платежей в статусе 'pending' (возможно, были отправлены в налоговую, но статус неизвестен): {pending}")
             logging.warning("Эти платежи пропущены для предотвращения дублей. Проверьте их вручную в ЛК налоговой.")
+            if self.notifier:
+                self.notifier.on_pending_found(len(pending))
         
         try:
             new_payments = await self.get_new_yookassa_payments()
@@ -439,6 +441,8 @@ class SyncManager:
                         receipt_uuid = await self.nalog.find_income(description, amount)
                         if receipt_uuid:
                             logging.info(f"✓ Чек найден в налоговой (был создан несмотря на ошибку ответа)")
+                            if self.notifier:
+                                self.notifier.on_payment_verified()
                             break
 
                         if attempt < 3:
@@ -484,6 +488,8 @@ class SyncManager:
                             self.state["processed_refunds"].append(refund.id)
                             self.state["last_refund_sync_time"] = refund.created_at
                             self.save_state()
+                            if self.notifier:
+                                self.notifier.on_refund_skipped()
                             continue
 
                         success = await self.nalog.cancel_income(receipt_uuid)
@@ -511,7 +517,7 @@ class SyncManager:
             else:
                 logging.info("✓ Новых возвратов не найдено.")
 
-            if not new_payments and not new_refunds and self.notifier:
+            if not new_payments and not new_refunds and self.notifier and not pending:
                 await self.notifier.send_no_payments()
 
         except Exception as e:
