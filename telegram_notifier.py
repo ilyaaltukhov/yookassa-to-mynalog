@@ -183,9 +183,8 @@ class TelegramNotifier:
                 if resp.status_code == 200:
                     logger.info("✓ Уведомление отправлено в Telegram.")
                 else:
-                    logger.warning(
-                        f"Telegram API вернул {resp.status_code}: {resp.text}"
-                    )
+                    safe_text = resp.text.replace(self.bot_token, "***")
+                    logger.warning(f"Telegram API вернул {resp.status_code}: {safe_text}")
         except Exception as e:
-            safe_msg = str(e).replace(self.bot_token, "<redacted>")
+            safe_msg = str(e).replace(self.bot_token, "***")
             logger.warning(f"Не удалось отправить уведомление в Telegram: {safe_msg}")
