@@ -1,292 +1,190 @@
-import asyncio
-import json
-import os
-import logging
-from datetime import datetime, timedelta
-from yookassa import Configuration, Payment, Refund
-import config
-from nalog_api import MoyNalogAPI
-from telegram_notifier import TelegramNotifier
-from utils import build_template_vars
+"""
+Создание чеков в «Мой налог» на основе платежей из ЮKassa.
 
-LOG_DIR = "logs"
-if not os.path.exists(LOG_DIR):
-    os.makedirs(LOG_DIR)
+    python main.py --from 2026-01-01 --to 2026-03-31
+    python main.py --from 2026-01-01 --to 2026-03-31 --dry-run
+"""
+
+import argparse
+import asyncio
+import logging
+import sys
+from datetime import datetime, timezone
+
+from yookassa import Configuration, Payment
+
+import config
+from nalog import NpdClient, CommentReturn
+from utils import build_template_vars
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(f"{LOG_DIR}/sync.log", encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
-logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
 
-class SyncManager:
-    def __init__(self):
-        try:
-            config.validate_config()
-        except ValueError as e:
-            logging.error(f"Ошибка конфигурации: {e}")
-            raise
-
-        Configuration.configure(config.YOOKASSA_SHOP_ID, config.YOOKASSA_API_KEY)
-        self.nalog = MoyNalogAPI(config.MOY_NALOG_LOGIN, config.MOY_NALOG_PASSWORD)
-        self.state_file = f"{LOG_DIR}/sync_state.json"
-        self.state = self.load_state()
-
-        if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
-            thread_id = None
-            if config.TELEGRAM_THREAD_ID:
-                try:
-                    thread_id = int(config.TELEGRAM_THREAD_ID)
-                except ValueError:
-                    logging.warning(f"TELEGRAM_THREAD_ID имеет некорректное значение: '{config.TELEGRAM_THREAD_ID}'. Сообщения будут отправляться в основной чат.")
-            self.notifier = TelegramNotifier(
-                bot_token=config.TELEGRAM_BOT_TOKEN,
-                chat_id=config.TELEGRAM_CHAT_ID,
-                thread_id=thread_id,
-                proxy=config.TELEGRAM_PROXY,
-            )
-            logging.info("✓ Telegram-уведомления включены.")
-        else:
-            self.notifier = None
-
-    async def startup_notify(self):
-        if self.notifier and os.environ.get("TELEGRAM_STARTUP_NOTIFY") == "1":
-            await self.notifier.send_startup()
-
-    def _ensure_state_fields(self, state):
-        defaults = {
-            "pending_payments": [],
-            "receipt_map": {},
-            "processed_refunds": [],
-            "last_refund_sync_time": None
-        }
-        for key, default in defaults.items():
-            if key not in state:
-                state[key] = default
-        return state
-
-    def load_state(self):
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, 'r') as f:
-                    state = json.load(f)
-                return self._ensure_state_fields(state)
-            except:
-                pass
-
-        base = {
-            "last_sync_time": f"{config.SYNC_START_DATE}T00:00:00Z" if config.SYNC_START_DATE else (datetime.now() - timedelta(days=1)).isoformat(),
-            "processed_payments": [],
-            "pending_payments": [],
-            "receipt_map": {},
-            "processed_refunds": [],
-            "last_refund_sync_time": None
-        }
-        return base
-
-    def save_state(self):
-        with open(self.state_file, 'w') as f:
-            json.dump(self.state, f)
-
-    async def get_new_yookassa_payments(self):
-        new_payments = []
-        last_sync = self.state.get("last_sync_time")
-        skip_ids = set(self.state["processed_payments"]) | set(self.state["pending_payments"])
-
-        params = {
-            "status": "succeeded",
-            "created_at.gte": last_sync
-        }
-
-        try:
-            res = Payment.list(params)
-            for payment in res.items:
-                if payment.id not in skip_ids:
-                    new_payments.append(payment)
-
-            while res.next_cursor:
-                params["cursor"] = res.next_cursor
-                res = Payment.list(params)
-                for payment in res.items:
-                    if payment.id not in skip_ids:
-                        new_payments.append(payment)
-        except Exception as e:
-            logging.error(f"Ошибка ЮKassa: {e}")
-
-        return new_payments
-
-    async def get_new_refunds(self):
-        new_refunds = []
-        last_refund_sync = self.state.get("last_refund_sync_time") or self.state.get("last_sync_time")
-
-        params = {
-            "status": "succeeded",
-            "created_at.gte": last_refund_sync
-        }
-
-        try:
-            res = Refund.list(params)
-            for refund in res.items:
-                if refund.id not in self.state["processed_refunds"]:
-                    new_refunds.append(refund)
-
-            while res.next_cursor:
-                params["cursor"] = res.next_cursor
-                res = Refund.list(params)
-                for refund in res.items:
-                    if refund.id not in self.state["processed_refunds"]:
-                        new_refunds.append(refund)
-        except Exception as e:
-            logging.error(f"Ошибка получения возвратов ЮKassa: {e}")
-
-        return new_refunds
-
-    async def sync(self):
-        logging.info("="*60)
-        logging.info("Начало синхронизации...")
-        logging.info(f"Последняя синхронизация: {self.state.get('last_sync_time')}")
-
-        pending = self.state.get("pending_payments", [])
-        if pending:
-            logging.warning(f"⚠ Обнаружено {len(pending)} платежей в статусе 'pending' (возможно, были отправлены в налоговую, но статус неизвестен): {pending}")
-            logging.warning("Эти платежи пропущены для предотвращения дублей. Проверьте их вручную в ЛК налоговой.")
-            if self.notifier:
-                self.notifier.on_pending_found(len(pending))
-
-        try:
-            new_payments = await self.get_new_yookassa_payments()
-
-            if not new_payments:
-                logging.info("✓ Новых платежей не найдено.")
-            else:
-                logging.info(f"✓ Найдено новых платежей: {len(new_payments)}")
-                if self.notifier:
-                    self.notifier.on_sync_start(len(new_payments))
-
-            successful = 0
-            failed = 0
-
-            for payment in new_payments:
-                try:
-                    amount = float(payment.amount.value)
-                    payment_date = datetime.fromisoformat(payment.created_at.replace('Z', '+00:00'))
-
-                    template_vars = build_template_vars(payment)
-                    description = config.INCOME_DESCRIPTION_TEMPLATE.format_map(template_vars)
-
-                    receipt_uuid = None
-
-                    for attempt in range(1, 4):
-                        receipt_uuid = await self.nalog.add_income(description, amount, payment_date)
-                        if receipt_uuid:
-                            break
-
-                        logging.warning(f"Попытка {attempt}/3: add_income не вернул receiptUuid для {payment.id}, проверяю наличие чека в налоговой...")
-                        receipt_uuid = await self.nalog.find_income(description, amount)
-                        if receipt_uuid:
-                            logging.info(f"✓ Чек найден в налоговой (был создан несмотря на ошибку ответа)")
-                            if self.notifier:
-                                self.notifier.on_payment_verified()
-                            break
-
-                        if attempt < 3:
-                            logging.info(f"Чек не найден, повторная попытка...")
-
-                    if receipt_uuid:
-                        self.state["processed_payments"].append(payment.id)
-                        self.state["receipt_map"][payment.id] = receipt_uuid
-                        self.state["last_sync_time"] = payment.created_at
-                        self.save_state()
-                        successful += 1
-                        if self.notifier:
-                            self.notifier.on_payment_success(amount)
-                    else:
-                        failed += 1
-                        logging.warning(f"Пропуск платежа {payment.id}: не удалось зарегистрировать после 3 попыток. "
-                                        f"Повторная попытка при следующей синхронизации.")
-                        if self.notifier:
-                            self.notifier.on_payment_error(payment.id, "ошибка регистрации дохода")
-                except Exception as e:
-                    failed += 1
-                    logging.error(f"Ошибка при обработке платежа {payment.id}: {e}")
-                    if self.notifier:
-                        self.notifier.on_payment_error(payment.id, str(e)[:80])
-
-            if new_payments:
-                logging.info(f"Результат платежей: успешно={successful}, ошибок={failed}")
-
-            new_refunds = await self.get_new_refunds()
-
-            if new_refunds:
-                logging.info(f"✓ Найдено новых возвратов: {len(new_refunds)}")
-
-                cancelled = 0
-                cancel_failed = 0
-
-                for refund in new_refunds:
-                    try:
-                        receipt_uuid = self.state["receipt_map"].get(refund.payment_id)
-
-                        if not receipt_uuid:
-                            logging.warning(f"Возврат {refund.id}: чек для платежа {refund.payment_id} не найден в receipt_map, пропуск")
-                            self.state["processed_refunds"].append(refund.id)
-                            self.state["last_refund_sync_time"] = refund.created_at
-                            self.save_state()
-                            if self.notifier:
-                                self.notifier.on_refund_skipped()
-                            continue
-
-                        success = await self.nalog.cancel_income(receipt_uuid)
-
-                        if success:
-                            self.state["processed_refunds"].append(refund.id)
-                            self.state["last_refund_sync_time"] = refund.created_at
-                            del self.state["receipt_map"][refund.payment_id]
-                            self.save_state()
-                            cancelled += 1
-                            if self.notifier:
-                                self.notifier.on_refund_cancelled()
-                        else:
-                            cancel_failed += 1
-                            logging.warning(f"Не удалось аннулировать чек {receipt_uuid} для возврата {refund.id}")
-                            if self.notifier:
-                                self.notifier.on_refund_error()
-                    except Exception as e:
-                        cancel_failed += 1
-                        logging.error(f"Ошибка при обработке возврата {refund.id}: {e}")
-                        if self.notifier:
-                            self.notifier.on_refund_error()
-
-                logging.info(f"Результат возвратов: аннулировано={cancelled}, ошибок={cancel_failed}")
-            else:
-                logging.info("✓ Новых возвратов не найдено.")
-
-            if not new_payments and not new_refunds and self.notifier and not pending:
-                await self.notifier.send_no_payments()
-
-        except Exception as e:
-            logging.error(f"Критическая ошибка при синхронизации: {e}", exc_info=True)
-        finally:
-            await self.nalog.close()
-            if self.notifier:
-                await self.notifier.send_summary()
-            logging.info("Синхронизация завершена.")
-            logging.info("="*60)
+def _yk_ts(dt: datetime) -> str:
+    """Формат timestamp для YooKassa API: YYYY-MM-DDThh:mm:ss.mmmZ."""
+    utc = dt.astimezone(timezone.utc)
+    ms = utc.microsecond // 1000
+    return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{ms:03d}Z"
 
 
-async def main():
+def _parse_date(value: str) -> datetime:
     try:
-        manager = SyncManager()
-        await manager.startup_notify()
-        await manager.sync()
-    except Exception as e:
-        logging.critical(f"Критическая ошибка: {e}", exc_info=True)
-        exit(1)
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"Неверный формат даты: {value!r} (ожидается YYYY-MM-DD)")
+
+
+def _payment_amount(payment) -> float:
+    return float(payment.amount.value)
+
+
+def _is_fully_refunded(payment) -> bool:
+    """Платёж полностью возвращён, если refunded_amount >= amount."""
+    if not payment.refunded_amount:
+        return False
+    return float(payment.refunded_amount.value) >= float(payment.amount.value)
+
+
+def _payment_description(payment) -> str:
+    return config.INCOME_DESCRIPTION_TEMPLATE.format_map(build_template_vars(payment))
+
+
+def _payment_date(payment) -> datetime:
+    return datetime.fromisoformat(payment.created_at.replace("Z", "+00:00"))
+
+
+# ── YooKassa ────────────────────────────────────────────────────────────
+
+def fetch_payments(date_from: datetime, date_to: datetime) -> list:
+    """Все успешные платежи из ЮKassa за период."""
+    params = {
+        "status": "succeeded",
+        "created_at.gte": _yk_ts(date_from),
+        "created_at.lte": _yk_ts(date_to),
+    }
+
+    payments = []
+    res = Payment.list(params)
+    payments.extend(res.items)
+
+    while res.next_cursor:
+        params["cursor"] = res.next_cursor
+        res = Payment.list(params)
+        payments.extend(res.items)
+
+    return payments
+
+
+# ── Output ──────────────────────────────────────────────────────────────
+
+def print_dry_run(payments: list) -> None:
+    if not payments:
+        print("\nПлатежей не найдено.")
+        return
+
+    total = 0.0
+    refunded_count = 0
+    print(f"\n{'='*80}")
+    print("  DRY RUN — чеки НЕ будут созданы")
+    print(f"{'='*80}")
+    print(f"\n  {'#':<4}  {'Дата':<20}  {'Сумма':>12}  {'':>10}  Описание")
+    print(f"  {'-'*76}")
+
+    for i, p in enumerate(payments, 1):
+        amount = _payment_amount(p)
+        total += amount
+        refunded = _is_fully_refunded(p)
+        if refunded:
+            refunded_count += 1
+        status = "ВОЗВРАТ" if refunded else ""
+        date_str = p.created_at[:19].replace("T", " ")
+        print(f"  {i:<4}  {date_str:<20}  {amount:>10.2f} р.  {status:>10}  {_payment_description(p)}")
+
+    print(f"  {'-'*76}")
+    print(f"  {'Итого':<26} {total:>10.2f} р.  ({len(payments)} платежей, {refunded_count} возвратов)")
+    print(f"{'='*80}\n")
+
+
+# ── Core ────────────────────────────────────────────────────────────────
+
+async def create_checks(payments: list) -> None:
+    async with NpdClient(config.MOY_NALOG_LOGIN, config.MOY_NALOG_PASSWORD) as client:
+        await client.auth()
+
+        success = 0
+        cancelled = 0
+        failed = 0
+        total = len(payments)
+
+        for i, p in enumerate(payments, 1):
+            amount = _payment_amount(p)
+            desc = _payment_description(p)
+            refunded = _is_fully_refunded(p)
+
+            try:
+                receipt = await client.create_check(
+                    name=desc,
+                    amount=amount,
+                    date_of_sale=_payment_date(p),
+                )
+                uuid = receipt.approved_receipt_uuid
+                success += 1
+                logging.info(
+                    "[%d/%d] Чек создан: %s | %.2f р. | %s",
+                    i, total, uuid, amount, desc,
+                )
+
+                if refunded:
+                    await client.cancel_check(uuid, comment=CommentReturn.receipt_return)
+                    cancelled += 1
+                    logging.info(
+                        "[%d/%d] Чек аннулирован (возврат): %s | %.2f р.",
+                        i, total, uuid, amount,
+                    )
+
+            except Exception as e:
+                failed += 1
+                logging.error("[%d/%d] Ошибка для платежа %s (%.2f р.): %s", i, total, p.id, amount, e)
+
+        logging.info("Готово: создано=%d, из них аннулировано=%d, ошибок=%d", success, cancelled, failed)
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Создание чеков в «Мой налог» по платежам из ЮKassa")
+    parser.add_argument("--from", dest="date_from", required=True, type=_parse_date, help="Начало периода (YYYY-MM-DD)")
+    parser.add_argument("--to", dest="date_to", required=True, type=_parse_date, help="Конец периода (YYYY-MM-DD)")
+    parser.add_argument("--dry-run", action="store_true", help="Только показать платежи, не создавать чеки")
+    return parser.parse_args(argv)
+
+
+async def main(argv: list[str] | None = None):
+    args = parse_args(argv)
+    date_to = args.date_to.replace(hour=23, minute=59, second=59)
+
+    config.validate_config(dry_run=args.dry_run)
+    Configuration.configure(config.YOOKASSA_SHOP_ID, config.YOOKASSA_API_KEY)
+
+    logging.info("Загрузка платежей из ЮKassa за %s — %s ...",
+                 args.date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+    payments = fetch_payments(args.date_from, date_to)
+    logging.info("Найдено платежей: %d", len(payments))
+
+    if args.dry_run:
+        print_dry_run(payments)
+        return
+
+    if not payments:
+        logging.info("Нечего обрабатывать.")
+        return
+
+    await create_checks(payments)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

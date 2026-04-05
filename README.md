@@ -1,228 +1,148 @@
-<h1 align=center>Авто-Синхрон чеков из <code>ЮKassa</code> в <code>Мой Налог</code> для самозанятых (НПД)</h1>
+# YooKassa → Мой Налог
 
-> **Автоматическая синхронизация** платежей из личного кабинета ЮKassa в приложение "Мой Налог"
+Создание чеков в «Мой Налог» на основе платежей из ЮKassa. Два режима работы:
 
-<p align=center>Данный репозиторий был создан и поддерживается в связи с тем, что <b>ЮKassa</b> остановили свой сервис авто-отправки чеков в "Мой Налог"</p>
+- **CLI-скрипт** — массовое создание чеков за период дат
+- **HTTP API** — создание и отмена чеков по одному (для интеграции с вашим сервисом)
+
+## Требования
+
+- Python 3.11+
+- Учётные данные ЮKassa (Shop ID + API ключ) — только для CLI
+- Учётные данные Мой Налог (ИНН + пароль от ЛК ФЛ)
+
+## Установка
+
+```bash
+git clone https://github.com/grandvan709/yookassa-to-mynalog.git
+cd yookassa-to-mynalog
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+# Заполнить .env своими данными
+```
+
+## Конфигурация (.env)
+
+| Переменная | Обязательная | Описание |
+|---|:-:|---|
+| `YOOKASSA_SHOP_ID` | CLI | ID магазина в ЮKassa |
+| `YOOKASSA_API_KEY` | CLI | API ключ ЮKassa |
+| `MOY_NALOG_LOGIN` | да | ИНН (логин от ЛК налоговой) |
+| `MOY_NALOG_PASSWORD` | да | Пароль от ЛК налоговой |
+| `TZ` | нет | Часовой пояс (по умолчанию `Europe/Moscow`) |
+| `INCOME_DESCRIPTION_TEMPLATE` | нет | Шаблон описания дохода (по умолчанию `Платеж #{description}`) |
+| `DB_PATH` | нет | Путь к SQLite базе для API (по умолчанию `app/checks.db`) |
+| `API_TOKEN` | API | Токен авторизации для API (`Authorization: Bearer <token>`) |
 
 ---
 
-## 🚀 Возможности
+## CLI-скрипт
 
-- ✅ Автоматическая синхронизация платежей при запуске контейнера
-- ✅ Автоматическое аннулирование чеков при возвратах в ЮKassa
-- ✅ Telegram-уведомления о результатах синхронизации
-- ✅ Регулярное выполнение по расписанию (настраивается через .env)
-- ✅ Валидация конфигурации при старте
-- ✅ Автоматические повторы при сбоях сети
-- ✅ Защита от дублирования чеков
-- ✅ Сохранение состояния синхронизации
-- ✅ Подробное логирование
+Массовое создание чеков за период. Забирает платежи из ЮKassa, создаёт чеки в «Мой Налог». Полностью возвращённые платежи автоматически аннулируются.
 
-## 📋 Требования
+### Просмотр платежей (dry-run)
 
-- Docker
-- Учетные данные ЮKassa (Shop ID + API ключ)
-- Учетные данные Мой Налог (логин + пароль)
-
----
-
-## 🔧 Установка
-
-### 1. Устанавливаем Docker
 ```bash
-sudo curl -fsSL https://get.docker.com | sh
+python app/main.py --from 2026-01-01 --to 2026-03-31 --dry-run
 ```
 
-### 2. Создаем папку `/opt/yookassa-to-mynalog` и переходим в нее (а так же создадим папку `logs` внутри)
+### Создание чеков
+
 ```bash
-sudo mkdir -p /opt/yookassa-to-mynalog/logs && cd /opt/yookassa-to-mynalog
+python app/main.py --from 2026-01-01 --to 2026-03-31
 ```
-
-### 3. Скачиваем файлы `.env.example` (его сразу ренеймим в `.env`) и `docker-compose.yml`
-```bash
-sudo wget -O .env https://raw.githubusercontent.com/grandvan709/yookassa-to-mynalog/refs/heads/master/.env.example && \
-sudo wget -O docker-compose.yml https://raw.githubusercontent.com/grandvan709/yookassa-to-mynalog/refs/heads/master/docker-compose.yml
-```
-
-### 4. Заполняем файл `.env` необходимыми значениями (см раздел "Конфигурация")
-```bash
-sudo nano .env
-```
-
-## ⚙️ Конфигурация
-
-### Обязательные переменные
-
-<table>
-  <tr>
-    <th>Переменная</th>
-    <th>Описание</th>
-  </tr>
-  <tr>
-    <td><code>YOOKASSA_SHOP_ID</code></td>
-    <td>ID магазина в ЮKassa</td>
-  </tr>
-  <tr>
-    <td><code>YOOKASSA_API_KEY</code></td>
-    <td>API ключ ЮKassa</td>
-  </tr>
-  <tr>
-    <td colspan="2">Логин и пароль от "Мой Налог" такие же как и от личного кабинета налоговой физлиц</td>
-  </tr>
-  <tr>
-    <td><code>MOY_NALOG_LOGIN</code></td>
-    <td>ИНН в Мой Налог</td>
-  </tr>
-  <tr>
-    <td><code>MOY_NALOG_PASSWORD</code></td>
-    <td>Пароль в Мой Налог</td>
-  </tr>
-</table>
-
-### Опциональные переменные
-
-| Переменная | По умолчанию | Описание |
-|-----------|:----------:|---------|
-| `TZ` | `Europe/Moscow` | Часовой пояс контейнера ([список](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)) |
-| `DEVICE_ID` | Генерация хеша из ИНН (21 символ) | Специальный ID, используемый для авторизации в "Мой Налог" |
-| `SYNC_START_DATE` | -24ч | Дата начала синхронизации (YYYY-MM-DD) |
-| `INCOME_DESCRIPTION_TEMPLATE` | `Платеж #{description}` | Шаблон описания дохода (см. ниже) |
-| `CRON_SCHEDULE` | `0 */4 * * *` | Расписание cron (каждые 4 часа) |
-
-### Telegram-уведомления (опционально)
-
-После каждой синхронизации бот отправляет итоговое сообщение в указанный чат/тред. Если переменные не заданы — скрипт работает как прежде.
-
-| Переменная | Описание |
-|-----------|---------|
-| `TELEGRAM_BOT_TOKEN` | Токен бота (получить у @BotFather) |
-| `TELEGRAM_CHAT_ID` | ID чата/группы (узнать через @userinfobot или @getidsbot) |
-| `TELEGRAM_THREAD_ID` | ID топика в супергруппе (опционально) |
-| `TELEGRAM_PROXY` | SOCKS5 прокси для серверов без прямого доступа к Telegram (опционально) |
 
 ### Переменные шаблона INCOME_DESCRIPTION_TEMPLATE
 
-В шаблоне описания дохода можно использовать следующие переменные:
-
 | Переменная | Описание |
-|-----------|---------|
-| `{description}` | Описание платежа из ЮKassa, либо ID платежа если описания нет |
-| `{id}` | ID платежа в ЮKassa (UUID) |
-| `{payment_description}` | Только описание платежа (пустая строка, если описания нет) |
-| `{order_number}` | Номер счёта/заказа из ЮKassa (например: `1227418-1`) |
-| `{invoice_id}` | ID счёта из invoice_details API (пустая строка, если нет) |
-| `{customer_name}` | Название/имя из счёта ЮKassa |
+|---|---|
+| `{description}` | Описание платежа из ЮKassa (или ID, если нет) |
+| `{id}` | ID платежа (UUID) |
+| `{order_number}` | Номер счёта/заказа |
+| `{customer_name}` | Имя покупателя |
 | `{amount}` | Сумма платежа |
-| `{merchant_customer_id}` | ID покупателя в вашей системе |
-
-### Примеры INCOME_DESCRIPTION_TEMPLATE
-
-```env
-INCOME_DESCRIPTION_TEMPLATE='Платеж #{description}'                                    # описание платежа, или ID если нет описания
-INCOME_DESCRIPTION_TEMPLATE='Оплата по счёту №{order_number}'                          # номер счёта из ЮKassa
-INCOME_DESCRIPTION_TEMPLATE='{customer_name} — счёт №{order_number}'                   # название + номер счёта
-INCOME_DESCRIPTION_TEMPLATE='Оплата услуг: {payment_description} ({amount} руб.)'      # описание + сумма
-INCOME_DESCRIPTION_TEMPLATE='Платеж {id}'                                              # ID платежа (UUID)
-```
-
-### Примеры CRON_SCHEDULE
-
-```env
-CRON_SCHEDULE='0 * * * *'        # каждый час
-CRON_SCHEDULE='0 */6 * * *'      # каждые 6 часов
-CRON_SCHEDULE='0 12 * * *'       # один раз в день в 12:00
-CRON_SCHEDULE='*/30 * * * *'     # каждые 30 минут
-CRON_SCHEDULE='0 0 * * 0'        # один раз в неделю в воскресенье
-```
-
-**Формат cron:** `минуты часы дни_месяца месяцы дни_недели`
-
-## 🚀 Запуск
-
-### Первый запуск
-```bash
-cd /opt/yookassa-to-mynalog && sudo docker compose up -d
-```
-
-### Проверка логов
-```bash
-cd /opt/yookassa-to-mynalog && sudo docker compose logs -f -t
-```
-
-### Остановка
-```bash
-cd /opt/yookassa-to-mynalog && sudo docker compose down
-```
-
-### Перезагрузка
-```bash
-cd /opt/yookassa-to-mynalog && sudo docker compose down && sudo docker compose up -d
-```
 
 ---
 
-## 📊 Структура логов
+## HTTP API
 
-```
-2026-04-01 11:00:01,915 - INFO - Начало синхронизации...
-2026-04-01 11:00:01,915 - INFO - Последняя синхронизация: 2026-03-31T10:47:18.218Z
-2026-04-01 11:00:02,491 - INFO - ✓ Найдено новых платежей: 3
-2026-04-01 11:00:02,877 - INFO - HTTP Request: POST https://lknpd.nalog.ru/api/v1/auth/lkfl "HTTP/1.1 200 OK"
-2026-04-01 11:00:02,880 - INFO - ✓ Успешная авторизация в Мой Налог.
-2026-04-01 11:00:04,276 - INFO - HTTP Request: POST https://lknpd.nalog.ru/api/v1/income "HTTP/1.1 200 OK"
-2026-04-01 11:00:04,278 - INFO - ✓ Доход успешно зарегистрирован: 250.0 руб. за 'Платеж: 1' (чек: 1234567890)
-2026-04-01 11:00:05,131 - INFO - HTTP Request: POST https://lknpd.nalog.ru/api/v1/income "HTTP/1.1 200 OK"
-2026-04-01 11:00:05,132 - INFO - ✓ Доход успешно зарегистрирован: 500.0 руб. за 'Платеж: 2' (чек: 0987654321)
-2026-04-01 11:00:07,283 - INFO - HTTP Request: POST https://lknpd.nalog.ru/api/v1/income "HTTP/1.1 200 OK"
-2026-04-01 11:00:07,289 - INFO - ✓ Доход успешно зарегистрирован: 360.0 руб. за 'Платеж: 3' (чек: 3216549870)
-2026-04-01 11:00:07,289 - INFO - Результат платежей: успешно=3, ошибок=0
-2026-04-01 11:00:07,471 - INFO - ✓ Новых возвратов не найдено.
-2026-04-01 11:00:07,719 - INFO - ✓ Уведомление отправлено в Telegram.
-2026-04-01 11:00:07,720 - INFO - Синхронизация завершена.
+Два эндпоинта для интеграции с вашим сервисом. Данные о чеках хранятся в SQLite.
+
+### Запуск
+
+```bash
+cd app
+uvicorn api.app:app --host 127.0.0.1 --port 8000
 ```
 
-### Обработка возвратов
+Документация: `http://localhost:8000/docs`
 
-При каждой синхронизации, помимо новых платежей, проверяются возвраты в ЮKassa. Если платёж был ранее зарегистрирован как доход — соответствующий чек в "Мой Налог" автоматически аннулируется с причиной "Возврат средств".
+Все запросы требуют заголовок `Authorization: Bearer <API_TOKEN>`.
 
-> **Важно:** аннулирование работает только для платежей, зарегистрированных **после обновления** до версии с поддержкой возвратов. Для более ранних платежей чеки при возврате нужно аннулировать вручную в ЛК налоговой.
+### POST /checks — создать чек
+
+```bash
+curl -X POST http://localhost:8000/checks \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"payment_id": "abc-123", "amount": 249.00, "description": "Оплата услуг"}'
+```
+
+Ответ `201`:
+```json
+{
+  "payment_id": "abc-123",
+  "receipt_uuid": "2a0bzznrt0",
+  "amount": 249.0,
+  "description": "Оплата услуг"
+}
+```
+
+### POST /checks/{payment_id}/cancel — аннулировать чек (возврат)
+
+```bash
+curl -X POST http://localhost:8000/checks/abc-123/cancel \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+Ответ `200`:
+```json
+{
+  "payment_id": "abc-123",
+  "receipt_uuid": "2a0bzznrt0",
+  "cancelled": true
+}
+```
+
+### Ошибки
+
+| Код | Когда |
+|---|---|
+| `409` | Чек для этого payment_id уже существует / уже аннулирован |
+| `404` | Чек для этого payment_id не найден (при отмене) |
 
 ---
 
-## 💡 Обновление ПО
+## Деплой
 
-### 1. Переходим в нашу папку
-```bash
-cd /opt/yookassa-to-mynalog
+См. [DEPLOY.md](DEPLOY.md) — настройка systemd + nginx.
+
+## Структура проекта
+
 ```
-
-### 2. Останавливаем контейнер
-```bash
-sudo docker compose down
+app/
+  main.py          — CLI-скрипт (массовое создание чеков)
+  config.py        — конфигурация из .env
+  utils.py         — шаблоны описаний платежей
+  nalog/           — клиент API «Мой Налог»
+    client.py      — NpdClient (авторизация, создание/отмена чеков)
+    models.py      — Pydantic-модели
+    enums.py       — перечисления
+    exceptions.py  — исключения
+  api/             — HTTP API (FastAPI)
+    app.py         — приложение, эндпоинты, lifespan
+    db.py          — async SQLite (маппинг payment_id → receipt_uuid)
+    schemas.py     — схемы запросов/ответов
 ```
-
-### 3. Скачиваем новый образ
-```bash
-sudo docker compose pull
-```
-
-### 4. Запускаем контейнер и смотрим логи после запуска новой версии
-```bash
-sudo docker compose up -d && sudo docker compose logs -f -t
-```
-
-### 5. Проверка docker-compose.yml и прочих файлов
-Перед обновлениями и запусками - убедитесь, что ваши файлы **docker-compose.yml** и **.env** *(и прочие, которые могут быть в будущем)* соответствуют последним версиям из репозитория!
-
-> Чтобы не писать `sudo` перед каждой командой `docker` - нужно внести пользователя, из под которого вы работаете, в группу **docker** следующей командой: `sudo usermod -aG docker <username>`. А затем перезайти на сервер.
----
-
-> **Ставь ⭐** и не пропусти регулярные обновления для поддержания актуальности скрипта и оптимальной автоматизации
-
-> USDT TRC20: TL6gHETnKqNWV4D6GjiKKahkBsAwcyWfo8 | [ЮKassa (руб.)](https://yookassa.ru/my/i/aZUoMtbfNgP8/l)
-
-<p align=center>
-    <a href="https://t.me/grand_van" target="_blank" rel="noopener noreferrer">
-        <img src="https://img.shields.io/badge/Telegram-GrandVan-purple?logo=telegram&logoColor=white&labelColor=blue" alt="Chat me on Telegram">
-    </a>
-</p>
